@@ -106,6 +106,74 @@ class ws_t
 			}
 		}
 
+		//! Send_websocket message using multiple buffers.
+		void
+		send_message(
+			final_frame_flag_t final_flag,
+			opcode_t opcode,
+			writable_items_container_t payloads,
+			write_status_cb_t wscb = write_status_cb_t{} )
+		{
+			if( !m_ws_connection_handle )
+			{
+				throw exception_t{ "websocket is not available" };
+			}
+
+			// Calculate the total size and check payload type:
+			const auto total_payload_size =
+				std::accumulate(
+					begin(payloads),
+					end(payloads),
+					0ull,
+					[]( auto memo, auto & p ){
+						if( restinio::writable_item_type_t::trivial_write_operation
+							!= p.write_type() )
+						{
+							throw exception_t{ "ws doesn't support sendfile" };
+						}
+						return memo + asio_ns::buffer_size( p.buf() );
+					} );
+
+			if( payloads.empty()
+				|| 0 != asio_ns::buffer_size( payloads[0].buf() ) )
+			{
+				// Need to have a first buffer for header.
+				payloads.insert( begin(payloads), writable_item_t{} );
+			}
+			// Else: this means the first buffer is empty we can use the existing
+			// buffer at pos=0 to carry the header.
+
+			// Create header, serialize it and set the first buffer to
+			// carry its image.
+			impl::message_details_t details{
+				final_flag, opcode, total_payload_size };
+
+			payloads[0] = impl::write_message_details( details );
+
+			write_group_t wg{ std::move( payloads ) };
+
+			if( wscb )
+			{
+				wg.after_write_notificator( std::move( wscb ) );
+			}
+
+			// TODO: set flag.
+			const bool is_close_frame =
+				opcode_t::connection_close_frame == opcode;
+
+			if( is_close_frame )
+			{
+				auto con = std::move( m_ws_connection_handle );
+				con->write_data( std::move( wg ), is_close_frame );
+			}
+			else
+			{
+				m_ws_connection_handle->write_data(
+					std::move( wg ),
+					is_close_frame );
+			}
+		}
+
 		//! Send_websocket message.
 		void
 		send_message(
@@ -114,57 +182,15 @@ class ws_t
 			writable_item_t payload,
 			write_status_cb_t wscb = write_status_cb_t{} )
 		{
-			if( m_ws_connection_handle )
-			{
-				if( restinio::writable_item_type_t::trivial_write_operation ==
-					payload.write_type() )
-				{
-					writable_items_container_t bufs;
-					bufs.reserve( 2 );
+			writable_items_container_t payloads;
+			payloads.resize( 2 );
+			payloads[ 1 ] = std::move( payload );
 
-					// Create header serialize it and append to bufs .
-					impl::message_details_t details{
-						final_flag, opcode, asio_ns::buffer_size( payload.buf() ) };
-
-					bufs.emplace_back(
-						impl::write_message_details( details ) );
-
-					bufs.emplace_back( std::move( payload ) );
-
-					write_group_t wg{ std::move( bufs ) };
-
-					if( wscb )
-					{
-						wg.after_write_notificator( std::move( wscb ) );
-					}
-
-					// TODO: set flag.
-					const bool is_close_frame =
-						opcode_t::connection_close_frame == opcode;
-
-					if( is_close_frame )
-					{
-						auto con = std::move( m_ws_connection_handle );
-						con->write_data(
-							std::move( wg ),
-							is_close_frame );
-					}
-					else
-					{
-						m_ws_connection_handle->write_data(
-							std::move( wg ),
-							is_close_frame );
-					}
-				}
-				else
-				{
-					throw exception_t{ "ws doesn't support sendfile" };
-				}
-			}
-			else
-			{
-				throw exception_t{ "websocket is not available" };
-			}
+			send_message(
+				final_flag,
+				opcode,
+				std::move( payloads ),
+				std::move( wscb ) );
 		}
 
 		void
